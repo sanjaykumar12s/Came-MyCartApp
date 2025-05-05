@@ -1,6 +1,6 @@
-package com.mycart.service.processors;
+package com.example.InventroyUpdateSubscriber.processor;
 
-import com.mycart.service.exception.ProcessException;
+import com.example.InventroyUpdateSubscriber.exception.ProcessException;
 import org.apache.camel.Exchange;
 import org.bson.Document;
 import org.springframework.stereotype.Component;
@@ -11,7 +11,7 @@ import java.util.*;
 @Component
 public class InventoryUpdates {
 
-    // Safely parse an object to integer, used for soldOut, damaged, availableStock
+    // Safely parse an integer from an object value
     private int parseIntSafe(Object value) {
         try {
             return Integer.parseInt(value.toString());
@@ -20,7 +20,7 @@ public class InventoryUpdates {
         }
     }
 
-    //  Convert incoming body into Document object (either from Map or Document)
+    // Extract a Document from the body of the Exchange, either from a Map or Document
     private Document getDocumentFromBody(Exchange exchange) {
         Object body = exchange.getIn().getBody();
         if (body instanceof Document) {
@@ -28,11 +28,11 @@ public class InventoryUpdates {
         } else if (body instanceof Map) {
             return new Document((Map<String, Object>) body);
         } else {
-            throw new ProcessException("You are updating a Invalid Item  " + (body != null ? body.getClass() : " It was not there in DB"));
+            throw new ProcessException("Unsupported body type: " + (body != null ? body.getClass() : "null"));
         }
     }
 
-    //  Handle custom errors during update and add them to errorList
+    // Handle any errors that occur during the inventory update process
     public void handleError(Exchange exchange) {
         ProcessException exception = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, ProcessException.class);
         List<Document> errorList = exchange.getProperty("errorList", List.class);
@@ -49,7 +49,7 @@ public class InventoryUpdates {
         exchange.setProperty("skipUpdate", true);
     }
 
-    //  Prepare a final success + error response to be returned after route is complete
+    // Prepare the final response after processing inventory updates
     public void prepareFinalResponse(Exchange exchange) {
         List<Document> errors = exchange.getProperty("errorList", List.class);
         List<Document> successes = exchange.getProperty("successList", List.class);
@@ -59,7 +59,6 @@ public class InventoryUpdates {
         response.put("successfulUpdates", successes);
         response.put("errors", errors);
 
-        // Logging summary
         exchange.getContext().createProducerTemplate().sendBody("log:finalResponseLog?level=INFO",
                 "Inventory update details:\n" +
                         "Successful updates: " + successes.size() + "\n" +
@@ -67,16 +66,14 @@ public class InventoryUpdates {
                         "Successful Items: " + successes + "\n" +
                         "Error Items: " + errors);
 
-        // Log full response for debugging
         exchange.getContext().createProducerTemplate().sendBody("log:finalResponseLog?level=DEBUG", response);
 
-        // Set HTTP response
         exchange.getMessage().setHeader(Exchange.HTTP_RESPONSE_CODE, errors.isEmpty() ? 200 : 400);
         exchange.getIn().setBody(response);
         exchange.getIn().setHeader(Exchange.CONTENT_TYPE, "application/json");
     }
 
-    //  Validate that the inventory input JSON contains a valid 'items' list
+    // Validate the incoming inventory request, ensuring the presence of 'items' field
     public void validateInventoryRequest(Exchange exchange) {
         Document body = getDocumentFromBody(exchange);
         if (!body.containsKey("items") || body.get("items") == null) {
@@ -100,7 +97,7 @@ public class InventoryUpdates {
         exchange.setProperty("failureList", new ArrayList<Document>());
     }
 
-    //  Extract item ID, soldOut and damaged values from each item document
+    // Extract and validate the stock fields for each inventory item
     public void extractAndValidateStockFields(Exchange exchange) {
         Document item = getDocumentFromBody(exchange);
         if (item == null || item.get("_id") == null || item.get("stockDetails") == null) {
@@ -119,7 +116,7 @@ public class InventoryUpdates {
         exchange.setProperty("damaged", damaged);
     }
 
-    //  Flatten items in case they are nested (list of lists structure)
+    // Flatten any nested lists of items into a single list
     public void flattenItems(Exchange exchange) {
         Document body = getDocumentFromBody(exchange);
         Object rawItems = body.get("items");
@@ -142,7 +139,7 @@ public class InventoryUpdates {
         exchange.getIn().setBody(flatItemList);
     }
 
-    //  Compute final availableStock and update lastUpdateDate
+    // Compute unified stock values for inventory items, considering sold out and damaged items
     public void computeUnifiedStock(Exchange exchange) {
         Document item = getDocumentFromBody(exchange);
         if (item == null) throw new ProcessException("Item not found in DB.");
@@ -183,5 +180,30 @@ public class InventoryUpdates {
         successList.add(successItem);
 
         exchange.getIn().setBody(item);
+    }
+
+    // Track successful inventory updates for items
+    public void trackSuccess(Exchange exchange) {
+        String itemId = exchange.getProperty("itemId", String.class);
+        List<Document> successList = exchange.getProperty("successList", List.class);
+
+        Document result = new Document();
+        result.put("itemId", itemId);
+        result.put("status", "success");
+        result.put("message", "Inventory updated successfully for item " + itemId);
+        successList.add(result);
+    }
+
+    // Track failed inventory updates for items
+    public void trackFailure(Exchange exchange) {
+        String itemId = exchange.getProperty("itemId", String.class);
+        String errorMsg = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Exception.class).getMessage();
+        List<Document> failureList = exchange.getProperty("failureList", List.class);
+
+        Document result = new Document();
+        result.put("itemId", itemId);
+        result.put("status", "failure");
+        result.put("error", errorMsg);
+        failureList.add(result);
     }
 }
